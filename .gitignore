@@ -175,3 +175,4 @@ controlnet-cache/
 upscale-cache/
 loras-cache/
 upscaler-cache/
+output.png
