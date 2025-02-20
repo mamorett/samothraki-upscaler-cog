@@ -9,6 +9,8 @@ import cv2
 import pywt
 import random
 import os
+import shutil
+from diffusers.utils import load_image
 from torchvision import transforms
 
 
@@ -137,7 +139,9 @@ class Predictor(BasePredictor):
 
     ) -> Path:
         """Run a single prediction on the model"""
-        input_image = Image.open(image)
+        # input_image = Image.open(image)
+
+        input_image = self.load_image(image)
 
         # Apply upscaling with selected model and scale factor
         # Create upscaler model with selected scale factor
@@ -179,6 +183,10 @@ class Predictor(BasePredictor):
         output_path = Path("/tmp/output.png")
         final_result.save(output_path)
         return output_path
+
+    def load_image(self, path):
+        shutil.copyfile(path, "/tmp/image.png")
+        return load_image("/tmp/image.png").convert("RGB")    
 
     def create_hdr_effect(self, original_image, hdr):
         if hdr == 0:
