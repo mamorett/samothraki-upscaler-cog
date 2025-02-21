@@ -155,8 +155,6 @@ class Predictor(BasePredictor):
         except Exception as e:
             raise RuntimeError(f"Error during upscaling: {e}")
 
-        torch.cuda.empty_cache()
-
         if hdr > 0.1:
             condition_image = self.create_hdr_effect(upscaled_image, hdr)
         else:
