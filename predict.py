@@ -113,6 +113,8 @@ class Predictor(BasePredictor):
             vae_path,
             torch_dtype=torch.float16
         )
+        vae.enable_tiling()
+
         self.pipe.vae = vae
         
         # Load LoRA weights
