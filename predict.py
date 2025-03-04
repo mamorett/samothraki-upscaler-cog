@@ -12,6 +12,7 @@ import os
 import shutil
 from diffusers.utils import load_image
 from torchvision import transforms
+import math
 
 
 class UpscalerModel(torch.nn.Module):
@@ -113,13 +114,19 @@ class Predictor(BasePredictor):
             vae_path,
             torch_dtype=torch.float16
         )
+
         self.pipe.vae = vae
         
-        # Load LoRA weights
-        self.pipe.load_lora_weights(lora_weights1_path)
-        self.pipe.fuse_lora(lora_scale=1.0)
-        self.pipe.load_lora_weights(lora_weights2_path)
-        self.pipe.fuse_lora(lora_scale=0.25)
+        self.pipe.load_lora_weights(
+            lora_weights1_path,
+            adapter_name="LCM_LoRA_Weights_SD15"  # Assign a unique name
+        )
+        self.pipe.load_lora_weights(
+            lora_weights2_path,
+            adapter_name="mode_details"  # Assign another unique name
+        )
+        self.pipe.set_adapters(["LCM_LoRA_Weights_SD15", "mode_details"], adapter_weights=[1.0, 0.25])  # Set scales
+        self.pipe.fuse_lora()  # Fuse all at once 
         
         # Set scheduler and enable FreeU
         self.pipe.scheduler = LCMScheduler.from_config(self.pipe.scheduler.config)
@@ -135,7 +142,9 @@ class Predictor(BasePredictor):
         denoise: float = Input(description="Denoise, use 1.0 for best results", default=1.0),
         hdr: float = Input(description="HDR effect intensity", default=0.0),
         guidance_scale: float = Input(description="Guidance scale", default=3.0),
-        color_correction: bool = Input(description="GWavelet Color Correction", default=True),
+        color_correction: bool = Input(description="Wavelet Color Correction", default=True),
+        calculate_tiles: bool = Input(description="Calculate tile size. If not set tile size is set to 1024", default=False),
+
 
     ) -> Path:
         """Run a single prediction on the model"""
@@ -165,7 +174,8 @@ class Predictor(BasePredictor):
             condition_image,
             num_inference_steps,
             denoise,
-            guidance_scale
+            guidance_scale,
+            calculate_tiles
         )
         
         if color_correction:
@@ -184,7 +194,36 @@ class Predictor(BasePredictor):
 
     def load_image(self, path):
         shutil.copyfile(path, "/tmp/image.png")
-        return load_image("/tmp/image.png").convert("RGB")    
+        return load_image("/tmp/image.png").convert("RGB")
+    
+    def calculate_tile_parameters(self, W, H, tilesize):
+        """
+        Calculates and prints tile-related parameters based on image dimensions.
+
+        Args:
+            W: The width of the image.
+            H: The height of the image.
+            tilesize: boolean indicating whether to calculate tile size adaptively.
+        """
+
+        # Adaptive tiling
+        if tilesize:
+            tile_width, tile_height = self.adaptive_tile_size((W, H))
+        else:
+            tile_width = tile_height = 1024
+        overlap = min(64, tile_width // 8, tile_height // 8)
+        num_tiles_x = math.ceil((W - overlap) / (tile_width - overlap))
+        num_tiles_y = math.ceil((H - overlap) / (tile_height - overlap))
+
+        print(f"Image Width (W): {W}")
+        print(f"Image Height (H): {H}")
+        print(f"Tile Width: {tile_width}")
+        print(f"Tile Height: {tile_height}")
+        print(f"Overlap: {overlap}")
+        print(f"Number of Tiles in X direction: {num_tiles_x}")
+        print(f"Number of Tiles in Y direction: {num_tiles_y}")
+        print(f"Total Number of Tiles: {num_tiles_x*num_tiles_y}")
+        return tile_width, tile_height, overlap, num_tiles_x, num_tiles_y    
 
     def create_hdr_effect(self, original_image, hdr):
         if hdr == 0:
@@ -247,47 +286,52 @@ class Predictor(BasePredictor):
         gaussian_weight = np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
         return gaussian_weight
 
-    def process_image(self, condition_image, num_inference_steps, strength, guidance_scale):
-        # Prepare the condition image       
+    def process_image(self, condition_image, num_inference_steps, strength, guidance_scale, tilesize):
+        print("Starting image processing...")
+        torch.cuda.empty_cache()
+        
+        # Convert input_image to PIL Image if it's a path
+        if isinstance(condition_image, str):
+            condition_image = Image.open(condition_image)
+
         W, H = condition_image.size
-        
-        # Set up tiling
-        tile_size = 512
-        overlap = 64
-        
-        # Calculate number of tiles
-        num_tiles_x = -(-W // (tile_size - overlap))  # Ceiling division
-        num_tiles_y = -(-H // (tile_size - overlap))
-        
-        # Create result canvas
+        tile_width, tile_height, overlap, num_tiles_x, num_tiles_y = self.calculate_tile_parameters(W, H, tilesize)
+
+        # Create a blank canvas for the result
         result = np.zeros((H, W, 3), dtype=np.float32)
         weight_sum = np.zeros((H, W, 1), dtype=np.float32)
         
         # Create gaussian weight
-        gaussian_weight = self.create_gaussian_weight(tile_size)
+        gaussian_weight = self.create_gaussian_weight(max(tile_width, tile_height))
+
+        num_inference_steps = int(num_inference_steps / strength)
         
-        # Process tiles
         for i in range(num_tiles_y):
             for j in range(num_tiles_x):
-                top = i * (tile_size - overlap)
-                left = j * (tile_size - overlap)
-                bottom = min(top + tile_size, H)
-                right = min(left + tile_size, W)
+                # Calculate tile coordinates
+                left = j * (tile_width - overlap)
+                top = i * (tile_height - overlap)
+                right = min(left + tile_width, W)
+                bottom = min(top + tile_height, H)
                 
-                # Extract and process tile
+                # Adjust tile size if it's at the edge
+                current_tile_size = (bottom - top, right - left)
+                
                 tile = condition_image.crop((left, top, right, bottom))
-                tile = tile.resize((tile_size, tile_size))
-                processed_tile = self.process_tile(tile, num_inference_steps, strength, guidance_scale)
+                tile = tile.resize((tile_width, tile_height))
                 
-                # Resize processed tile if needed
-                if (bottom - top, right - left) != (tile_size, tile_size):
-                    processed_tile = cv2.resize(processed_tile, (right - left, bottom - top))
-                    tile_weight = cv2.resize(gaussian_weight, (right - left, bottom - top))
+                # Process the tile
+                result_tile = self.process_tile(tile, num_inference_steps, strength, guidance_scale)
+                
+                # Apply gaussian weighting
+                if current_tile_size != (tile_width, tile_height):
+                    result_tile = cv2.resize(result_tile, current_tile_size[::-1])
+                    tile_weight = cv2.resize(gaussian_weight, current_tile_size[::-1])
                 else:
-                    tile_weight = gaussian_weight
+                    tile_weight = gaussian_weight[:current_tile_size[0], :current_tile_size[1]]
                 
-                # Add to result with weighting
-                result[top:bottom, left:right] += processed_tile * tile_weight[:, :, np.newaxis]
+                # Add the tile to the result with gaussian weighting
+                result[top:bottom, left:right] += result_tile * tile_weight[:, :, np.newaxis]
                 weight_sum[top:bottom, left:right] += tile_weight[:, :, np.newaxis]
         
         # Normalize result
