@@ -114,15 +114,19 @@ class Predictor(BasePredictor):
             vae_path,
             torch_dtype=torch.float16
         )
-        vae.enable_tiling()
 
         self.pipe.vae = vae
         
-        # Load LoRA weights
-        self.pipe.load_lora_weights(lora_weights1_path)
-        self.pipe.fuse_lora(lora_scale=1.0)
-        self.pipe.load_lora_weights(lora_weights2_path)
-        self.pipe.fuse_lora(lora_scale=0.25)
+        self.pipe.load_lora_weights(
+            lora_weights1_path,
+            adapter_name="LCM_LoRA_Weights_SD15"  # Assign a unique name
+        )
+        self.pipe.load_lora_weights(
+            lora_weights2_path,
+            adapter_name="mode_details"  # Assign another unique name
+        )
+        self.pipe.set_adapters(["LCM_LoRA_Weights_SD15", "mode_details"], adapter_weights=[1.0, 0.25])  # Set scales
+        self.pipe.fuse_lora()  # Fuse all at once 
         
         # Set scheduler and enable FreeU
         self.pipe.scheduler = LCMScheduler.from_config(self.pipe.scheduler.config)
@@ -138,7 +142,9 @@ class Predictor(BasePredictor):
         denoise: float = Input(description="Denoise, use 1.0 for best results", default=1.0),
         hdr: float = Input(description="HDR effect intensity", default=0.0),
         guidance_scale: float = Input(description="Guidance scale", default=3.0),
-        color_correction: bool = Input(description="GWavelet Color Correction", default=True),
+        color_correction: bool = Input(description="Wavelet Color Correction", default=True),
+        calculate_tiles: bool = Input(description="Calculate tile size. If not set tile size is set to 1024", default=False),
+
 
     ) -> Path:
         """Run a single prediction on the model"""
@@ -168,7 +174,8 @@ class Predictor(BasePredictor):
             condition_image,
             num_inference_steps,
             denoise,
-            guidance_scale
+            guidance_scale,
+            calculate_tiles
         )
         
         if color_correction:
@@ -188,6 +195,7 @@ class Predictor(BasePredictor):
     def load_image(self, path):
         shutil.copyfile(path, "/tmp/image.png")
         return load_image("/tmp/image.png").convert("RGB")
+    
     def calculate_tile_parameters(self, W, H, tilesize):
         """
         Calculates and prints tile-related parameters based on image dimensions.
@@ -278,24 +286,14 @@ class Predictor(BasePredictor):
         gaussian_weight = np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
         return gaussian_weight
 
-    def process_image(self, input_image, scale_by, num_inference_steps, strength, hdr, guidance_scale, tilesize):
+    def process_image(self, condition_image, num_inference_steps, strength, guidance_scale, tilesize):
         print("Starting image processing...")
         torch.cuda.empty_cache()
-        lazy_pipe.set_scheduler()
         
         # Convert input_image to PIL Image if it's a path
         if isinstance(input_image, str):
-            input_image = Image.open(input_image)
-        
-        # Convert input_image to numpy array
-        input_array = np.array(input_image)
-        
-        # Prepare the condition image
-        condition_image = self.upscale_image_with_model(input_image, scale_by, "4x_NMKD-Siax_200k")
-        if hdr > 0.0:
-            condition_image = self.create_hdr_effect(condition_image)
-        
-        condition_image_numpy = np.array(condition_image)
+            input_image = Image.open(condition_image)
+
         W, H = condition_image.size
         tile_width, tile_height, overlap, num_tiles_x, num_tiles_y = self.calculate_tile_parameters(W, H, tilesize)
 
@@ -323,7 +321,7 @@ class Predictor(BasePredictor):
                 tile = tile.resize((tile_width, tile_height))
                 
                 # Process the tile
-                result_tile = process_tile(tile, num_inference_steps, strength, guidance_scale)
+                result_tile = self.process_tile(tile, num_inference_steps, strength, guidance_scale)
                 
                 # Apply gaussian weighting
                 if current_tile_size != (tile_width, tile_height):
@@ -336,9 +334,6 @@ class Predictor(BasePredictor):
                 result[top:bottom, left:right] += result_tile * tile_weight[:, :, np.newaxis]
                 weight_sum[top:bottom, left:right] += tile_weight[:, :, np.newaxis]
         
-        # Normalize the result
-        final_result = (result / weight_sum).astype(np.uint8)
-        print("Image processing completed successfully")
-        wavelet_image=wavelet_color_transfer(condition_image_numpy, final_result)
-        print ("Wavelet color transfer completed successfully")
-        return [input_array, wavelet_image]
+        # Normalize result
+        final_result = (result / weight_sum).astype(np.uint8)        
+        return Image.fromarray(final_result)
