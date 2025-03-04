@@ -4,7 +4,6 @@ from PIL import Image
 import numpy as np
 from diffusers import StableDiffusionControlNetImg2ImgPipeline, ControlNetModel, LCMScheduler
 from diffusers.models import AutoencoderKL
-from cog import BasePredictor, Input, Path
 import cv2
 import pywt
 import random
@@ -190,11 +189,6 @@ class Predictor(BasePredictor):
             final_result = Image.fromarray(final_result_numpy)  # Convert back to PIL Image
         else:
             final_result = processed_image
-
-        # # Save the original image (resized to match dimensions) and append to outputs
-        # original_file_path = Path(f"original-{uuid.uuid1()}.png")
-        # input_image.save(original_file_path)
-        # outputs.append(original_file_path)
 
         # Save the upscaled image and append to outputs
         upscaled_file_path = Path(f"upscaled-{uuid.uuid1()}.png")
