@@ -13,7 +13,8 @@ import shutil
 from diffusers.utils import load_image
 from torchvision import transforms
 import math
-
+import time
+import uuid
 
 class UpscalerModel(torch.nn.Module):
     def __init__(self, scale=2.0):  # Add self parameter and default value
@@ -146,9 +147,12 @@ class Predictor(BasePredictor):
         calculate_tiles: bool = Input(description="Calculate tile size. If not set tile size is set to 1024", default=False),
 
 
-    ) -> Path:
+    ) -> list[Path]:
         """Run a single prediction on the model"""
-        # input_image = Image.open(image)
+        print("Running prediction")
+        start_time = time.time()
+
+        outputs = []  # Initialize outputs list at the start
 
         input_image = self.load_image(image)
 
@@ -187,10 +191,18 @@ class Predictor(BasePredictor):
         else:
             final_result = processed_image
 
-        # Save and return the result
-        output_path = Path("/tmp/output.png")
-        final_result.save(output_path)
-        return output_path
+        # # Save the original image (resized to match dimensions) and append to outputs
+        # original_file_path = Path(f"original-{uuid.uuid1()}.png")
+        # input_image.save(original_file_path)
+        # outputs.append(original_file_path)
+
+        # Save the upscaled image and append to outputs
+        upscaled_file_path = Path(f"upscaled-{uuid.uuid1()}.png")
+        final_result.save(upscaled_file_path)
+        outputs.append(upscaled_file_path)
+
+        print(f"Prediction took {round(time.time() - start_time, 2)} seconds")
+        return outputs
 
     def load_image(self, path):
         shutil.copyfile(path, "/tmp/image.png")
