@@ -291,8 +291,8 @@ class Predictor(BasePredictor):
         torch.cuda.empty_cache()
         
         # Convert input_image to PIL Image if it's a path
-        if isinstance(input_image, str):
-            input_image = Image.open(condition_image)
+        if isinstance(condition_image, str):
+            condition_image = Image.open(condition_image)
 
         W, H = condition_image.size
         tile_width, tile_height, overlap, num_tiles_x, num_tiles_y = self.calculate_tile_parameters(W, H, tilesize)
