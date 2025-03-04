@@ -176,3 +176,4 @@ upscale-cache/
 loras-cache/
 upscaler-cache/
 output.png
+.cog/
